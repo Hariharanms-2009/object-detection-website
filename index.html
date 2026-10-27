@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spotter – live object detection</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;800&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#E8EDF1; --panel:#FFFFFF; --ink:#12202E; --muted:#5B6B7A;
+  --line:#CBD5DD; --cobalt:#2B59FF; --stage:#0E1822; --alert:#C8321B;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 16px/1.5 "IBM Plex Sans",system-ui,sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 20px 40px}
+h1{font:800 clamp(30px,5vw,52px)/1.02 "Bricolage Grotesque",system-ui,sans-serif;letter-spacing:-.02em;margin:0 0 8px}
+.lead{color:var(--muted);margin:0 0 24px;max-width:56ch}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:20px;align-items:start}
+.stage{position:relative;background:var(--stage);border-radius:10px;overflow:hidden;aspect-ratio:16/9}
+.stage video,.stage canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+.empty{position:absolute;inset:0;display:grid;place-content:center;text-align:center;color:#AFC0CF;padding:24px}
+.empty strong{display:block;font:600 22px "Bricolage Grotesque",sans-serif;color:#fff;margin-bottom:4px}
+.hud{position:absolute;left:12px;top:12px;background:rgba(14,24,34,.78);color:#fff;border-radius:6px;padding:4px 10px;font-size:14px;display:none}
+.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px}
+button,.btn{font:500 15px "IBM Plex Sans",sans-serif;border:1.5px solid var(--ink);background:var(--panel);color:var(--ink);border-radius:8px;padding:9px 16px;cursor:pointer}
+button.primary{background:var(--cobalt);border-color:var(--cobalt);color:#fff}
+button.stop{background:var(--alert);border-color:var(--alert);color:#fff}
+button:disabled{opacity:.45;cursor:not-allowed}
+button:focus-visible,.btn:focus-within,input:focus-visible,select:focus-visible{outline:3px solid var(--cobalt);outline-offset:2px}
+.btn input{position:absolute;opacity:0;width:0;height:0}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px}
+.panel h2{font:600 20px "Bricolage Grotesque",sans-serif;margin:0 0 12px}
+.set{display:grid;gap:14px;margin-bottom:20px;padding-bottom:20px;border-bottom:1px solid var(--line)}
+label{display:grid;gap:6px;font-size:14px;color:var(--muted)}
+label span b{color:var(--ink);font-weight:500}
+input[type=range]{width:100%;accent-color:var(--cobalt)}
+select{font:inherit;padding:8px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}
+ul{list-style:none;margin:0;padding:0;display:grid;gap:12px}
+li .row{display:flex;justify-content:space-between;gap:8px}
+li .name{font-weight:500;display:flex;align-items:center;gap:8px}
+li .dot{width:10px;height:10px;border-radius:2px;display:inline-block}
+li .bar{height:6px;background:var(--paper);border-radius:3px;margin-top:5px;overflow:hidden}
+li .bar i{display:block;height:100%}
+.none{color:var(--muted);font-size:15px}
+.msg{margin-top:12px;color:var(--alert);font-size:15px;min-height:1.5em}
+@media(max-width:860px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Point the camera at something.<br>Spotter names it.</h1>
+  <p class="lead">Detection runs inside your browser. Your video never leaves this device.</p>
+
+  <div class="grid">
+    <div>
+      <div class="stage" id="stage">
+        <video id="video" playsinline muted></video>
+        <canvas id="overlay"></canvas>
+        <div class="empty" id="empty"><div><strong>Camera is off</strong>Start the camera or upload an image to begin.</div></div>
+        <div class="hud" id="hud"></div>
+      </div>
+      <div class="controls">
+        <button class="primary" id="startBtn">Start camera</button>
+        <button class="stop" id="stopBtn" disabled>Stop</button>
+        <button id="snapBtn" disabled>Save snapshot</button>
+        <label class="btn" style="display:inline-block;position:relative;color:var(--ink);font-size:15px">Upload image
+          <input type="file" id="file" accept="image/*">
+        </label>
+      </div>
+      <div class="msg" id="msg" role="status"></div>
+    </div>
+
+    <aside class="panel">
+      <div class="set">
+        <label>
+          <span>Minimum confidence: <b id="confVal">50%</b></span>
+          <input type="range" id="conf" min="10" max="95" value="50">
+        </label>
+        <label>Model
+          <select id="base">
+            <option value="lite_mobilenet_v2">Fast (lighter)</option>
+            <option value="mobilenet_v2">Accurate (slower)</option>
+          </select>
+        </label>
+      </div>
+      <h2>Detected now</h2>
+      <ul id="list"><li class="none">Nothing yet.</li></ul>
+    </aside>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video'), canvas = $('overlay'), ctx = canvas.getContext('2d');
+const COLORS = ['#2B59FF','#FF6A3D','#14B8A6','#D946EF','#F5B700','#3FA34D'];
+const colorOf = name => { let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0; return COLORS[h % COLORS.length]; };
+
+let model = null, stream = null, running = false, minConf = 0.5, last = performance.now();
+
+const setMsg = t => $('msg').textContent = t || '';
+
+async function ensureModel() {
+  if (model) return;
+  setMsg('Loading model…');
+  model = await cocoSsd.load({ base: $('base').value });
+  setMsg('');
+}
+
+function draw(preds) {
+  const fs = Math.max(14, Math.round(canvas.width / 48));
+  ctx.lineWidth = Math.max(2, canvas.width / 400);
+  ctx.font = `600 ${fs}px "IBM Plex Sans", sans-serif`;
+  ctx.textBaseline = 'top';
+  for (const p of preds) {
+    const [x, y, w, h] = p.bbox, col = colorOf(p.class);
+    ctx.strokeStyle = col; ctx.strokeRect(x, y, w, h);
+    const label = `${p.class} ${Math.round(p.score * 100)}%`;
+    const tw = ctx.measureText(label).width + 12, th = fs + 8;
+    const ty = y - th < 0 ? y : y - th;
+    ctx.fillStyle = col; ctx.fillRect(x, ty, tw, th);
+    ctx.fillStyle = '#fff'; ctx.fillText(label, x + 6, ty + 4);
+  }
+}
+
+function renderList(preds) {
+  const groups = {};
+  for (const p of preds) {
+    const g = groups[p.class] || (groups[p.class] = { n: 0, best: 0 });
+    g.n++; g.best = Math.max(g.best, p.score);
+  }
+  const names = Object.keys(groups).sort((a, b) => groups[b].n - groups[a].n);
+  if (!names.length) { $('list').innerHTML = '<li class="none">Nothing yet.</li>'; return; }
+  $('list').innerHTML = names.map(n => {
+    const g = groups[n], c = colorOf(n);
+    return `<li><div class="row"><span class="name"><i class="dot" style="background:${c}"></i>${n}</span><span>${g.n > 1 ? '×' + g.n + ' · ' : ''}${Math.round(g.best * 100)}%</span></div>
+      <div class="bar"><i style="width:${g.best * 100}%;background:${c}"></i></div></li>`;
+  }).join('');
+}
+
+async function loop() {
+  if (!running) return;
+  try {
+    const preds = (await model.detect(video, 20, 0.1)).filter(p => p.score >= minConf);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    draw(preds); renderList(preds);
+    const now = performance.now();
+    $('hud').textContent = Math.round(1000 / (now - last)) + ' fps';
+    last = now;
+  } catch (e) { console.error(e); }
+  requestAnimationFrame(loop);
+}
+
+async function start() {
+  setMsg('');
+  $('startBtn').disabled = true;
+  try {
+    await ensureModel();
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    video.srcObject = stream;
+    await video.play();
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    video.style.visibility = 'visible';
+    $('empty').style.display = 'none'; $('hud').style.display = 'block';
+    $('stopBtn').disabled = false; $('snapBtn').disabled = false;
+    running = true; last = performance.now(); loop();
+  } catch (e) {
+    $('startBtn').disabled = false;
+    setMsg(e.name === 'NotAllowedError'
+      ? 'Camera access was blocked. Click the lock icon in the address bar, allow the camera, then try again.'
+      : e.name === 'NotFoundError'
+        ? 'No camera found. Plug one in, or upload an image instead.'
+        : 'Could not start: ' + e.message);
+  }
+}
+
+function stop() {
+  running = false;
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null; video.srcObject = null;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  $('empty').style.display = 'grid'; $('hud').style.display = 'none';
+  $('startBtn').disabled = false; $('stopBtn').disabled = true; $('snapBtn').disabled = true;
+  renderList([]);
+}
+
+function snapshot() {
+  const c = document.createElement('canvas');
+  c.width = canvas.width; c.height = canvas.height;
+  const k = c.getContext('2d');
+  if (video.videoWidth) k.drawImage(video, 0, 0, c.width, c.height);
+  k.drawImage(canvas, 0, 0);
+  const a = document.createElement('a');
+  a.href = c.toDataURL('image/png'); a.download = 'spotter-snapshot.png'; a.click();
+}
+
+$('file').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  if (running) stop();
+  try {
+    await ensureModel();
+    const img = new Image();
+    img.src = URL.createObjectURL(f);
+    await img.decode();
+    canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+    ctx.drawImage(img, 0, 0);
+    const preds = (await model.detect(canvas, 30, 0.1)).filter(p => p.score >= minConf);
+    draw(preds); renderList(preds);
+    $('empty').style.display = 'none';
+    video.style.visibility = 'hidden';
+    setMsg(preds.length ? '' : 'No objects found at this confidence. Try lowering the slider.');
+  } catch (err) { setMsg('Could not read that image: ' + err.message); }
+  e.target.value = '';
+});
+
+$('conf').addEventListener('input', e => { minConf = e.target.value / 100; $('confVal').textContent = e.target.value + '%'; });
+$('base').addEventListener('change', () => { model = null; if (running) { running = false; ensureModel().then(() => { running = true; loop(); }); } });
+$('startBtn').addEventListener('click', start);
+$('stopBtn').addEventListener('click', stop);
+$('snapBtn').addEventListener('click', snapshot);
+</script>
+</body>
+</html>
